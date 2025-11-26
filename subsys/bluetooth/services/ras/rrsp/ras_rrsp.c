@@ -7,10 +7,12 @@
 #include <zephyr/bluetooth/conn.h>
 #include <zephyr/bluetooth/uuid.h>
 #include <zephyr/bluetooth/gatt.h>
+#include <zephyr/init.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/__assert.h>
 #include <zephyr/net_buf.h>
 #include <bluetooth/services/ras.h>
+#include <errno.h>
 
 #include "../ras_internal.h"
 
@@ -50,6 +52,7 @@ static struct bt_ras_rrsp {
 } rrsp_pool[CONFIG_BT_RAS_RRSP_MAX_ACTIVE_CONN];
 
 static struct k_work_q rrsp_wq;
+static bool rrsp_service_registered;
 
 static uint32_t ras_optional_features = RAS_FEAT_REALTIME_RD;
 
@@ -207,39 +210,57 @@ static void rd_overwritten_ccc_cfg_changed(struct bt_gatt_attr const *attr, uint
 	LOG_DBG("Ranging Data Overwritten CCCD changed: %u", value);
 }
 
-BT_GATT_SERVICE_DEFINE(
-	rrsp_svc, BT_GATT_PRIMARY_SERVICE(BT_UUID_RANGING_SERVICE),
-	/* RAS Features */
-	BT_GATT_CHARACTERISTIC(BT_UUID_RAS_FEATURES, BT_GATT_CHRC_READ, BT_GATT_PERM_READ_ENCRYPT,
-			       ras_features_read, NULL, NULL),
-	/* On-demand Ranging Data */
-	BT_GATT_CHARACTERISTIC(BT_UUID_RAS_ONDEMAND_RD, BT_GATT_CHRC_INDICATE | BT_GATT_CHRC_NOTIFY,
-			       BT_GATT_PERM_NONE, NULL, NULL, NULL),
-	BT_GATT_CCC_WITH_WRITE_CB(NULL, ondemand_rd_ccc_cfg_write_cb,
-				  BT_GATT_PERM_READ_ENCRYPT | BT_GATT_PERM_WRITE_ENCRYPT),
-	/* Real-time Ranging Data */
-	BT_GATT_CHARACTERISTIC(BT_UUID_RAS_REALTIME_RD, BT_GATT_CHRC_INDICATE | BT_GATT_CHRC_NOTIFY,
-			       BT_GATT_PERM_NONE, NULL, NULL, NULL),
-	BT_GATT_CCC_WITH_WRITE_CB(NULL, realtime_rd_ccc_cfg_write_cb,
-				  BT_GATT_PERM_READ_ENCRYPT | BT_GATT_PERM_WRITE_ENCRYPT),
-	/* RAS-CP */
-	BT_GATT_CHARACTERISTIC(BT_UUID_RAS_CP,
-			       BT_GATT_CHRC_WRITE_WITHOUT_RESP | BT_GATT_CHRC_INDICATE,
-			       BT_GATT_PERM_WRITE_ENCRYPT, NULL, ras_cp_write, NULL),
-	BT_GATT_CCC(ras_cp_ccc_cfg_changed, BT_GATT_PERM_READ_ENCRYPT | BT_GATT_PERM_WRITE_ENCRYPT),
-	/* Ranging Data Ready */
-	BT_GATT_CHARACTERISTIC(BT_UUID_RAS_RD_READY,
-			       BT_GATT_CHRC_READ | BT_GATT_CHRC_INDICATE | BT_GATT_CHRC_NOTIFY,
-			       BT_GATT_PERM_READ_ENCRYPT, rd_ready_read, NULL, NULL),
-	BT_GATT_CCC(rd_ready_ccc_cfg_changed,
-		    BT_GATT_PERM_READ_ENCRYPT | BT_GATT_PERM_WRITE_ENCRYPT),
-	/* Ranging Data Overwritten */
-	BT_GATT_CHARACTERISTIC(BT_UUID_RAS_RD_OVERWRITTEN,
-			       BT_GATT_CHRC_READ | BT_GATT_CHRC_INDICATE | BT_GATT_CHRC_NOTIFY,
-			       BT_GATT_PERM_READ_ENCRYPT, rd_overwritten_read, NULL, NULL),
-	BT_GATT_CCC(rd_overwritten_ccc_cfg_changed,
-		    BT_GATT_PERM_READ_ENCRYPT | BT_GATT_PERM_WRITE_ENCRYPT),
-);
+#define RRSP_GATT_ATTRS                                                              \
+	BT_GATT_PRIMARY_SERVICE(BT_UUID_RANGING_SERVICE),                            \
+	/* RAS Features */                                                           \
+	BT_GATT_CHARACTERISTIC(BT_UUID_RAS_FEATURES, BT_GATT_CHRC_READ,              \
+			       BT_GATT_PERM_READ_ENCRYPT, ras_features_read, NULL, \
+			       NULL),                                              \
+	/* On-demand Ranging Data */                                                 \
+	BT_GATT_CHARACTERISTIC(BT_UUID_RAS_ONDEMAND_RD,                              \
+			       BT_GATT_CHRC_INDICATE | BT_GATT_CHRC_NOTIFY,        \
+			       BT_GATT_PERM_NONE, NULL, NULL, NULL),               \
+	BT_GATT_CCC_WITH_WRITE_CB(NULL, ondemand_rd_ccc_cfg_write_cb,                \
+				  BT_GATT_PERM_READ_ENCRYPT |                     \
+					  BT_GATT_PERM_WRITE_ENCRYPT),           \
+	/* Real-time Ranging Data */                                                 \
+	BT_GATT_CHARACTERISTIC(BT_UUID_RAS_REALTIME_RD,                              \
+			       BT_GATT_CHRC_INDICATE | BT_GATT_CHRC_NOTIFY,        \
+			       BT_GATT_PERM_NONE, NULL, NULL, NULL),               \
+	BT_GATT_CCC_WITH_WRITE_CB(NULL, realtime_rd_ccc_cfg_write_cb,                \
+				  BT_GATT_PERM_READ_ENCRYPT |                     \
+					  BT_GATT_PERM_WRITE_ENCRYPT),           \
+	/* RAS-CP */                                                                 \
+	BT_GATT_CHARACTERISTIC(BT_UUID_RAS_CP,                                       \
+			       BT_GATT_CHRC_WRITE_WITHOUT_RESP |                 \
+				       BT_GATT_CHRC_INDICATE,                   \
+			       BT_GATT_PERM_WRITE_ENCRYPT, NULL, ras_cp_write,   \
+			       NULL),                                             \
+	BT_GATT_CCC(ras_cp_ccc_cfg_changed,                                          \
+		    BT_GATT_PERM_READ_ENCRYPT | BT_GATT_PERM_WRITE_ENCRYPT),       \
+	/* Ranging Data Ready */                                                     \
+	BT_GATT_CHARACTERISTIC(BT_UUID_RAS_RD_READY,                                 \
+			       BT_GATT_CHRC_READ | BT_GATT_CHRC_INDICATE |        \
+				       BT_GATT_CHRC_NOTIFY,                      \
+			       BT_GATT_PERM_READ_ENCRYPT, rd_ready_read, NULL,    \
+			       NULL),                                             \
+	BT_GATT_CCC(rd_ready_ccc_cfg_changed,                                        \
+		    BT_GATT_PERM_READ_ENCRYPT | BT_GATT_PERM_WRITE_ENCRYPT),       \
+	/* Ranging Data Overwritten */                                               \
+	BT_GATT_CHARACTERISTIC(BT_UUID_RAS_RD_OVERWRITTEN,                           \
+			       BT_GATT_CHRC_READ | BT_GATT_CHRC_INDICATE |        \
+				       BT_GATT_CHRC_NOTIFY,                      \
+			       BT_GATT_PERM_READ_ENCRYPT, rd_overwritten_read,    \
+			       NULL, NULL),                                       \
+	BT_GATT_CCC(rd_overwritten_ccc_cfg_changed,                                  \
+		    BT_GATT_PERM_READ_ENCRYPT | BT_GATT_PERM_WRITE_ENCRYPT)
+
+#if defined(CONFIG_BT_RAS_RRSP_MANUAL_SERVICE_REGISTER)
+static struct bt_gatt_attr rrsp_attrs[] = { RRSP_GATT_ATTRS };
+struct bt_gatt_service rrsp_svc = BT_GATT_SERVICE(rrsp_attrs);
+#else
+BT_GATT_SERVICE_DEFINE(rrsp_svc, RRSP_GATT_ATTRS);
+#endif
 
 static ssize_t ondemand_rd_ccc_cfg_write_cb(struct bt_conn *conn, const struct bt_gatt_attr *attr,
 					    uint16_t value)
@@ -526,6 +547,45 @@ static struct bt_ras_rd_buffer_cb rd_buffer_callbacks = {
 	.new_ranging_data_received = new_rd_handle,
 	.ranging_data_overwritten = rd_overwritten_handle,
 };
+
+int bt_ras_rrsp_service_register(void)
+{
+#if defined(CONFIG_BT_RAS_RRSP_MANUAL_SERVICE_REGISTER)
+	if (rrsp_service_registered) {
+		return -EALREADY;
+	}
+
+	int err = bt_gatt_service_register(&rrsp_svc);
+
+	if (!err) {
+		rrsp_service_registered = true;
+	}
+
+	return err;
+#else
+	ARG_UNUSED(rrsp_service_registered);
+	return -ENOTSUP;
+#endif
+}
+
+int bt_ras_rrsp_service_unregister(void)
+{
+#if defined(CONFIG_BT_RAS_RRSP_MANUAL_SERVICE_REGISTER)
+	if (!rrsp_service_registered) {
+		return -EALREADY;
+	}
+
+	int err = bt_gatt_service_unregister(&rrsp_svc);
+
+	if (!err) {
+		rrsp_service_registered = false;
+	}
+
+	return err;
+#else
+	return -ENOTSUP;
+#endif
+}
 
 static int ras_rrsp_init(void)
 {

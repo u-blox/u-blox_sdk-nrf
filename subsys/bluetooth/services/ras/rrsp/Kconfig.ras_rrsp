@@ -15,6 +15,16 @@ config BT_RAS_RRSP_AUTO_ALLOC_INSTANCE
 	help
 	  Automatically allocate RRSP instances to new connections.
 
+config BT_RAS_RRSP_MANUAL_SERVICE_REGISTER
+	bool "Defer RRSP GATT service registration to the application"
+	default n
+	help
+	  When enabled, the RRSP GATT service is not registered automatically at boot.
+	  The application must explicitly call bt_ras_rrsp_service_register() and
+	  bt_ras_rrsp_service_unregister() to control when the service is exposed.
+	  Disable this option to restore the legacy behavior where the service is
+	  always registered during system initialization.
+
 config BT_RAS_RRSP_MAX_ACTIVE_CONN
 	int "Number of simultaneously supported RRSP instances"
 	default BT_MAX_CONN
