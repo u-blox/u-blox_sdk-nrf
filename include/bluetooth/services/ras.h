@@ -260,6 +260,26 @@ int bt_ras_rrsp_alloc(struct bt_conn *conn);
  */
 void bt_ras_rrsp_free(struct bt_conn *conn);
 
+/**
+ * @brief Register the RRSP GATT service.
+ *
+ * When CONFIG_BT_RAS_RRSP_MANUAL_SERVICE_REGISTER is enabled, applications must call this
+ * function before exposing RRSP characteristics to peers.
+ *
+ * @return 0 on success, -EALREADY if the service is already registered, or a negative error code.
+ */
+int bt_ras_rrsp_service_register(void);
+
+/**
+ * @brief Unregister the RRSP GATT service.
+ *
+ * Removes the RRSP GATT service that was previously registered via
+ * bt_ras_rrsp_service_register().
+ *
+ * @return 0 on success, -EALREADY if the service is not registered, or a negative error code.
+ */
+int bt_ras_rrsp_service_unregister(void);
+
 /** @brief Register ranging data buffer callbacks.
  *
  *  Register callbacks to monitor ranging data buffer state.
