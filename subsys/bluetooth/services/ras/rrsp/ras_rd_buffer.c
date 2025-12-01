@@ -5,6 +5,7 @@
  */
 
 #include <errno.h>
+#include <string.h>
 #include <zephyr/types.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
@@ -24,7 +25,8 @@ LOG_MODULE_DECLARE(ras_rrsp, CONFIG_BT_RAS_RRSP_LOG_LEVEL);
 
 BUILD_ASSERT(RD_POOL_SIZE <= UINT8_MAX);
 
-static struct ras_rd_buffer rd_buffer_pool[RD_POOL_SIZE];
+static struct ras_rd_buffer *rd_buffer_pool;
+static size_t rd_buffer_pool_size;
 static int8_t tx_power_cache[CONFIG_BT_MAX_CONN];
 static int32_t drop_procedure_counter[CONFIG_BT_MAX_CONN];
 static sys_slist_t callback_list = SYS_SLIST_STATIC_INIT(&callback_list);
@@ -54,7 +56,11 @@ static void notify_rd_overwritten(struct bt_conn *conn, uint16_t ranging_counter
 static struct ras_rd_buffer *rd_buffer_get(struct bt_conn *conn, uint16_t ranging_counter,
 					   bool ready, bool busy)
 {
-	for (uint8_t i = 0; i < ARRAY_SIZE(rd_buffer_pool); i++) {
+	if (!rd_buffer_pool) {
+		return NULL;
+	}
+
+	for (uint8_t i = 0; i < rd_buffer_pool_size; i++) {
 		if (rd_buffer_pool[i].conn == conn &&
 		    rd_buffer_pool[i].ranging_counter == ranging_counter &&
 		    rd_buffer_pool[i].ready == ready && rd_buffer_pool[i].busy == busy) {
@@ -94,13 +100,17 @@ static void rd_buffer_free(struct ras_rd_buffer *buf)
 
 static struct ras_rd_buffer *rd_buffer_alloc(struct bt_conn *conn, uint16_t ranging_counter)
 {
+	if (!rd_buffer_pool) {
+		return NULL;
+	}
+
 	uint16_t conn_buffer_count = 0;
 	uint16_t oldest_ranging_counter = UINT16_MAX;
 	uint16_t oldest_ranging_counter_age = 0;
 	struct ras_rd_buffer *available_free_buffer = NULL;
 	struct ras_rd_buffer *available_oldest_buffer = NULL;
 
-	for (uint8_t i = 0; i < ARRAY_SIZE(rd_buffer_pool); i++) {
+	for (uint8_t i = 0; i < rd_buffer_pool_size; i++) {
 		if (rd_buffer_pool[i].conn == conn) {
 			conn_buffer_count++;
 
@@ -301,7 +311,11 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 {
 	ARG_UNUSED(reason);
 
-	for (uint8_t i = 0; i < ARRAY_SIZE(rd_buffer_pool); i++) {
+	if (!rd_buffer_pool) {
+		return;
+	}
+
+	for (uint8_t i = 0; i < rd_buffer_pool_size; i++) {
 		if (rd_buffer_pool[i].conn == conn) {
 			rd_buffer_free(&rd_buffer_pool[i]);
 		}
@@ -371,4 +385,45 @@ int bt_ras_rd_buffer_bytes_pull(struct ras_rd_buffer *buf, uint8_t *out_buf, uin
 	*empty = (remaining == pull_bytes);
 
 	return pull_bytes;
+}
+
+int ras_rd_buffer_pool_init(void)
+{
+	if (rd_buffer_pool != NULL) {
+		return -EALREADY;
+	}
+
+	rd_buffer_pool_size = RD_POOL_SIZE;
+	size_t alloc_size = rd_buffer_pool_size * sizeof(struct ras_rd_buffer);
+
+	rd_buffer_pool = k_malloc(alloc_size);
+	if (!rd_buffer_pool) {
+		LOG_ERR("Failed to allocate RD buffer pool (%zu bytes)", alloc_size);
+		rd_buffer_pool_size = 0;
+		return -ENOMEM;
+	}
+
+	memset(rd_buffer_pool, 0, alloc_size);
+
+	LOG_DBG("RD buffer pool allocated: %zu buffers (%zu bytes)", rd_buffer_pool_size, alloc_size);
+
+	return 0;
+}
+
+void ras_rd_buffer_pool_cleanup(void)
+{
+	if (!rd_buffer_pool) {
+		return;
+	}
+
+	/* Free all buffers and unref connections */
+	for (uint8_t i = 0; i < rd_buffer_pool_size; i++) {
+		rd_buffer_free(&rd_buffer_pool[i]);
+	}
+
+	k_free(rd_buffer_pool);
+	rd_buffer_pool = NULL;
+	rd_buffer_pool_size = 0;
+
+	LOG_DBG("RD buffer pool deallocated");
 }
