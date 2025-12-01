@@ -77,6 +77,16 @@ struct ras_segment {
 	uint8_t               data[];
 } __packed;
 
+/** @brief Initialize RD buffer pool with dynamic allocation.
+ *
+ *  @return 0 on success, negative error code on failure.
+ */
+int ras_rd_buffer_pool_init(void);
+
+/** @brief Cleanup and deallocate RD buffer pool.
+ */
+void ras_rd_buffer_pool_cleanup(void);
+
 #ifdef __cplusplus
 }
 #endif
