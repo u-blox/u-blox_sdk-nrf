@@ -555,10 +555,18 @@ int bt_ras_rrsp_service_register(void)
 		return -EALREADY;
 	}
 
-	int err = bt_gatt_service_register(&rrsp_svc);
+	int err = ras_rd_buffer_pool_init();
+	if (err) {
+		LOG_ERR("Failed to initialize RD buffer pool: %d", err);
+		return err;
+	}
+
+	err = bt_gatt_service_register(&rrsp_svc);
 
 	if (!err) {
 		rrsp_service_registered = true;
+	} else {
+		ras_rd_buffer_pool_cleanup();
 	}
 
 	return err;
@@ -579,6 +587,7 @@ int bt_ras_rrsp_service_unregister(void)
 
 	if (!err) {
 		rrsp_service_registered = false;
+		ras_rd_buffer_pool_cleanup();
 	}
 
 	return err;
