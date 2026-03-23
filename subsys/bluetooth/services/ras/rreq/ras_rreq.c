@@ -771,6 +771,9 @@ static int realtime_rd_subscribe_params_populate(struct bt_gatt_dm *dm, struct b
 	rreq->real_time_rd.subscribe_params.notify = ras_real_time_ranging_data_notify_func;
 	rreq->real_time_rd.subscribe_params.value = BT_GATT_CCC_NOTIFY | BT_GATT_CCC_INDICATE;
 	rreq->real_time_rd.subscribe_params.subscribe = subscribed_func;
+	/*ubx patch start*/
+	atomic_set_bit(rreq->real_time_rd.subscribe_params.flags, BT_GATT_SUBSCRIBE_FLAG_VOLATILE);
+	/*ubx patch end*/
 
 	return 0;
 }
@@ -979,11 +982,11 @@ int bt_ras_rreq_realtime_rd_subscribe(struct bt_conn *conn, struct net_buf_simpl
 		return err;
 	}
 
-	if (!err) {
-		rreq->real_time_rd.data_cb = data_received_cb;
-		rreq->real_time_rd.ranging_data_out = ranging_data_out;
-		net_buf_simple_reset(ranging_data_out);
-	}
+	/*ubx patch start*/
+	rreq->real_time_rd.data_cb = data_received_cb;
+	rreq->real_time_rd.ranging_data_out = ranging_data_out;
+	net_buf_simple_reset(ranging_data_out);
+	/*ubx patch end*/
 
 	return 0;
 }
