@@ -431,8 +431,16 @@ static void send_data_work_handler(struct k_work *work)
 	int err = rd_segment_send(rrsp);
 
 	if (err) {
-		/* Will keep retrying. */
+		/* Will keep retrying. Re-submit the work item so the retry actually
+		 * happens — the success path of rd_segment_send re-submits itself
+		 * for the next segment, but the error path returns without doing so.
+		 * Without this re-submit, a single GATT notify failure under
+		 * sustained A2_B2 (n_ap=4, ~12 KB/procedure to stream) leaves
+		 * rrsp->streaming = true forever, all subsequent procedures get
+		 * dropped via "Dropped new ranging data.", the peer eventually
+		 * supervision-times-out, and the controller hangs. */
 		LOG_WRN("Failed to send segment: %d", err);
+		k_work_submit_to_queue(&rrsp_wq, &rrsp->send_data_work);
 	}
 }
 
