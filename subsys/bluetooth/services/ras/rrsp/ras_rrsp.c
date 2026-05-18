@@ -392,7 +392,9 @@ static int rd_segment_send(struct bt_ras_rrsp *rrsp)
 	if (!last_seg) {
 		k_work_submit_to_queue(&rrsp_wq, &rrsp->send_data_work);
 	} else {
-		LOG_DBG("All segments sent");
+		LOG_DBG("All segments sent (ranging_counter=%u, seg_counter=%u)",
+			rrsp->active_buf ? rrsp->active_buf->ranging_counter : 0,
+			rrsp->segment_counter);
 
 		rrsp->streaming = false;
 		k_work_cancel(&rrsp->send_data_work);
@@ -402,6 +404,7 @@ static int rd_segment_send(struct bt_ras_rrsp *rrsp)
 
 		if (bt_gatt_is_subscribed(rrsp->conn, ondemand_rd_attr,
 					  BT_GATT_CCC_NOTIFY | BT_GATT_CCC_INDICATE)) {
+			LOG_DBG("Waiting RAS-CP ACK for ranging_counter=%u", rrsp->active_buf->ranging_counter);
 			rascp_send_complete_rd_rsp(rrsp->conn, rrsp->active_buf->ranging_counter);
 			k_timer_start(&rrsp->rascp_timeout, RASCP_ACK_DATA_TIMEOUT, K_NO_WAIT);
 		} else {
@@ -417,6 +420,7 @@ static int rd_segment_send(struct bt_ras_rrsp *rrsp)
 			bt_ras_rd_buffer_release(rrsp->active_buf);
 			rrsp->active_buf = NULL;
 			rrsp->active_buf_read_cursor = 0;
+			LOG_DBG("Released active realtime buffer after last segment");
 		}
 	}
 
@@ -428,6 +432,8 @@ static void send_data_work_handler(struct k_work *work)
 	struct bt_ras_rrsp *rrsp = CONTAINER_OF(work, struct bt_ras_rrsp, send_data_work);
 
 	if (!rrsp->streaming || !rrsp->active_buf) {
+		LOG_DBG("send_data_work ignored (streaming=%d active_buf=%p)",
+			rrsp->streaming, rrsp->active_buf);
 		return;
 	}
 
@@ -442,7 +448,11 @@ static void send_data_work_handler(struct k_work *work)
 		 * rrsp->streaming = true forever, all subsequent procedures get
 		 * dropped via "Dropped new ranging data.", the peer eventually
 		 * supervision-times-out, and the controller hangs. */
-		LOG_WRN("Failed to send segment: %d", err);
+		LOG_WRN("Failed to send segment: %d (ranging_counter=%u seg_counter=%u cursor=%u)",
+			err,
+			rrsp->active_buf ? rrsp->active_buf->ranging_counter : 0,
+			rrsp->segment_counter,
+			rrsp->active_buf_read_cursor);
 		k_work_submit_to_queue(&rrsp_wq, &rrsp->send_data_work);
 	}
 }
@@ -466,6 +476,8 @@ static void status_work_handler(struct k_work *work)
 		/* The procedure is considered to have failed if the peer does not ACK
 		 * the data within 5 seconds of rascp_send_complete_rd_rsp being called.
 		 */
+		LOG_WRN("RAS-CP timeout releasing active buffer (ranging_counter=%u)",
+			rrsp->active_buf ? rrsp->active_buf->ranging_counter : 0);
 		(void)bt_ras_rd_buffer_release(rrsp->active_buf);
 		rrsp->active_buf = NULL;
 		rrsp->active_buf_read_cursor = 0;
@@ -527,13 +539,23 @@ static void new_rd_handle(struct bt_conn *conn, uint16_t ranging_counter)
 				if (!rrsp->streaming) {
 					rrsp->active_buf =
 						bt_ras_rd_buffer_claim(conn, ranging_counter);
+					if (!rrsp->active_buf) {
+						LOG_WRN("Realtime claim failed for ranging_counter=%u", ranging_counter);
+						return;
+					}
 					rrsp->active_buf_read_cursor = 0;
 					rrsp->segment_counter = 0;
 					rrsp->streaming = true;
 
+					LOG_DBG("Realtime stream start ranging_counter=%u", ranging_counter);
+
 					k_work_submit_to_queue(&rrsp_wq, &rrsp->send_data_work);
 				} else {
-					LOG_DBG("Dropped new ranging data.");
+					LOG_WRN("Dropped new ranging data (new=%u active=%u cursor=%u seg=%u)",
+						ranging_counter,
+						rrsp->active_buf ? rrsp->active_buf->ranging_counter : 0,
+						rrsp->active_buf_read_cursor,
+						rrsp->segment_counter);
 				}
 			}
 		}
