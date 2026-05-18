@@ -405,15 +405,18 @@ static int rd_segment_send(struct bt_ras_rrsp *rrsp)
 			rascp_send_complete_rd_rsp(rrsp->conn, rrsp->active_buf->ranging_counter);
 			k_timer_start(&rrsp->rascp_timeout, RASCP_ACK_DATA_TIMEOUT, K_NO_WAIT);
 		} else {
-			struct bt_gatt_attr *realtime_rd_attr =
-				bt_gatt_find_by_uuid(rrsp_svc.attrs, 0, BT_UUID_RAS_REALTIME_RD);
-
-			if (bt_gatt_is_subscribed(rrsp->conn, realtime_rd_attr,
-						  BT_GATT_CCC_NOTIFY | BT_GATT_CCC_INDICATE)) {
-				bt_ras_rd_buffer_release(rrsp->active_buf);
-				rrsp->active_buf = NULL;
-				rrsp->active_buf_read_cursor = 0;
-			}
+			/* Realtime mode (or peer unsubscribed mid-stream): release the
+			 * buffer unconditionally to avoid a refcount leak. The previous
+			 * code gated the release on bt_gatt_is_subscribed(realtime_rd),
+			 * which can return false transiently (CCC update in flight,
+			 * L2CAP backpressure, reconnect). Each such race leaked one
+			 * refcount permanently; after ~3 leaks the entire RD buffer
+			 * pool became unallocatable and the SDC controller stalled.
+			 * The buffer was claimed in new_rd_handle() where realtime sub
+			 * was confirmed, so the unconditional release here is correct. */
+			bt_ras_rd_buffer_release(rrsp->active_buf);
+			rrsp->active_buf = NULL;
+			rrsp->active_buf_read_cursor = 0;
 		}
 	}
 
