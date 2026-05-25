@@ -31,6 +31,7 @@ static struct bt_ras_rrsp {
 	struct k_work send_data_work;
 	struct k_work rascp_work;
 	struct k_work status_work;
+	struct k_work cleanup_work;
 	struct k_timer rascp_timeout;
 
 	struct bt_gatt_indicate_params ranging_data_ind_params;
@@ -59,6 +60,7 @@ static uint32_t ras_optional_features = RAS_FEAT_REALTIME_RD;
 static void send_data_work_handler(struct k_work *work);
 static void rascp_work_handler(struct k_work *work);
 static void status_work_handler(struct k_work *work);
+static void cleanup_work_handler(struct k_work *work);
 static void rascp_timeout_handler(struct k_timer *timer);
 
 static int ranging_data_notify_or_indicate(struct bt_conn *conn, struct net_buf_simple *buf);
@@ -84,6 +86,17 @@ static struct bt_ras_rrsp *rrsp_find(struct bt_conn *conn)
 	}
 
 	return NULL;
+}
+
+static bool rrsp_conn_is_connected(const struct bt_conn *conn)
+{
+	struct bt_conn_info info;
+
+	if (bt_conn_get_info(conn, &info) != 0) {
+		return false;
+	}
+
+	return info.state == BT_CONN_STATE_CONNECTED;
 }
 
 int bt_ras_rrsp_alloc(struct bt_conn *conn)
@@ -113,6 +126,7 @@ int bt_ras_rrsp_alloc(struct bt_conn *conn)
 	k_work_init(&rrsp->send_data_work, send_data_work_handler);
 	k_work_init(&rrsp->rascp_work, rascp_work_handler);
 	k_work_init(&rrsp->status_work, status_work_handler);
+	k_work_init(&rrsp->cleanup_work, cleanup_work_handler);
 	k_timer_init(&rrsp->rascp_timeout, rascp_timeout_handler, NULL);
 
 	return 0;
@@ -130,10 +144,8 @@ void bt_ras_rrsp_free(struct bt_conn *conn)
 		(void)k_work_cancel(&rrsp->status_work);
 		k_timer_stop(&rrsp->rascp_timeout);
 
-		k_work_queue_drain(&rrsp_wq, false);
-
-		bt_conn_unref(rrsp->conn);
-		rrsp->conn = NULL;
+		/* Never block disconnection on rrsp_wq progress. */
+		k_work_submit_to_queue(&rrsp_wq, &rrsp->cleanup_work);
 	}
 }
 
@@ -453,6 +465,12 @@ static void send_data_work_handler(struct k_work *work)
 			rrsp->active_buf ? rrsp->active_buf->ranging_counter : 0,
 			rrsp->segment_counter,
 			rrsp->active_buf_read_cursor);
+
+		if (err == -ENOTCONN || err == -ECONNRESET || err == -ESHUTDOWN) {
+			rrsp->streaming = false;
+			return;
+		}
+
 		k_work_submit_to_queue(&rrsp_wq, &rrsp->send_data_work);
 	}
 }
@@ -502,6 +520,28 @@ static void status_work_handler(struct k_work *work)
 		}
 
 		rrsp->notify_ready = false;
+	}
+}
+
+static void cleanup_work_handler(struct k_work *work)
+{
+	struct bt_ras_rrsp *rrsp = CONTAINER_OF(work, struct bt_ras_rrsp, cleanup_work);
+
+	/* Runs on rrsp_wq, serialized with RRSP worker items. */
+	rrsp->streaming = false;
+	rrsp->notify_ready = false;
+	rrsp->notify_overwritten = false;
+	rrsp->handle_rascp_timeout = false;
+
+	if (rrsp->active_buf) {
+		(void)bt_ras_rd_buffer_release(rrsp->active_buf);
+		rrsp->active_buf = NULL;
+		rrsp->active_buf_read_cursor = 0;
+	}
+
+	if (rrsp->conn) {
+		bt_conn_unref(rrsp->conn);
+		rrsp->conn = NULL;
 	}
 }
 
@@ -639,6 +679,15 @@ static int ras_rrsp_init(void)
 
 	bt_ras_rd_buffer_cb_register(&rd_buffer_callbacks);
 
+#if !defined(CONFIG_BT_RAS_RRSP_MANUAL_SERVICE_REGISTER)
+	int err = ras_rd_buffer_pool_init();
+
+	if (err) {
+		LOG_ERR("Failed to initialize RD buffer pool: %d", err);
+		return err;
+	}
+#endif
+
 	return 0;
 }
 
@@ -672,6 +721,12 @@ static int ranging_data_notify_or_indicate(struct bt_conn *conn, struct net_buf_
 	struct bt_ras_rrsp *rrsp = rrsp_find(conn);
 
 	__ASSERT_NO_MSG(rrsp);
+
+	if (!rrsp_conn_is_connected(conn)) {
+		rrsp->streaming = false;
+		return -ENOTCONN;
+	}
+
 	ARG_UNUSED(rrsp);
 
 	attr = bt_gatt_find_by_uuid(rrsp_svc.attrs, 0, BT_UUID_RAS_REALTIME_RD);
