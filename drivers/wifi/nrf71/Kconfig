@@ -504,31 +504,12 @@ config WIFI_FIXED_MAC_ADDRESS
 	help
 	  This option overrides the MAC address read from OTP. It is strictly for testing purposes only.
 
-choice WIFI_MAC_ADDRESS
-	prompt "Wi-Fi MAC address type"
-	default WIFI_FIXED_MAC_ADDRESS_ENABLED if WIFI_FIXED_MAC_ADDRESS != ""
-	default WIFI_OTP_MAC_ADDRESS
-	help
-	  Select the type of MAC address to be used by the Wi-Fi driver
-
-config WIFI_OTP_MAC_ADDRESS
-	bool "Use MAC address from OTP"
-	help
-	  This option uses the MAC address stored in the OTP memory of the nRF70.
-
-config WIFI_FIXED_MAC_ADDRESS_ENABLED
-	bool "Fixed MAC address"
-	help
-	  Enable fixed MAC address
-
-config WIFI_RANDOM_MAC_ADDRESS
-	bool "Random MAC address generation at runtime"
-	depends on ENTROPY_GENERATOR
-	help
-	  This option enables random MAC address generation at runtime.
-	  The random MAC address is generated using the entropy device random generator.
-
-endchoice
+# WIFI_MAC_ADDRESS choice + members are also defined in
+# zephyr/drivers/wifi/nrf_wifi/Kconfig.nrfwifi. Duplicating them here
+# triggers "defined with a prompt outside the choice" warnings under
+# sysbuild strict parsing. We have no nRF71 hardware in this product;
+# drop these so Kconfig parses clean. (Upstream Nordic still has the
+# duplication in v3.3.0 and ncs/main as of 2026-05-27.)
 
 config NRF71_RSSI_STALE_TIMEOUT_MS
 	int "RSSI stale timeout in milliseconds"

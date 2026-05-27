@@ -6,6 +6,7 @@
 if SOC_SERIES_NRF54H
 
 config MCUBOOT_DIRECT_XIP_GENERATE_VARIANT
+	bool # drop when NCSDK-37325 lands upstream
 	default n
 
 endif # SOC_SERIES_NRF54H

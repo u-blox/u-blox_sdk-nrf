@@ -83,6 +83,7 @@ config NRF_CLOUD_COAP_DISCONNECT_ON_FAILED_REQUEST
 
 # Increase the maximum path length to have enough room
 config COAP_CLIENT_MAX_PATH_LENGTH
+	int # workaround: sysbuild strict parsing requires explicit type
 	default 128
 
 # When Memfault uploads via nRF Cloud CoAP, larger block/message sizes reduce the number

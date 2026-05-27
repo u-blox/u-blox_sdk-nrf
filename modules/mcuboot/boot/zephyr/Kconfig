@@ -60,13 +60,17 @@ config MCUBOOT_NRF_CLEANUP_PERIPHERAL
 	depends on SOC_FAMILY_NORDIC_NRF
 	default y
 
-if IRONSIDE_SE_CALL
-
-choice IRONSIDE_SE_CALL_DRIVER
-	default IRONSIDE_SE_CALL_MINIMAL
-endchoice
-
-endif
+# Upstream IRONSIDE_SE_CALL_DRIVER choice references IRONSIDE_SE_CALL_MINIMAL
+# which is undefined in v3.3.0 (and ncs/main as of 2026-05-27). Disabled here
+# because we do not use IronSide SE on NORA-B26X; re-enable if Nordic ships
+# a complete definition.
+#if IRONSIDE_SE_CALL
+#
+#choice IRONSIDE_SE_CALL_DRIVER
+#	default IRONSIDE_SE_CALL_MINIMAL
+#endchoice
+#
+#endif
 
 config NCS_MCUBOOT_LOAD_PERIPHCONF
 	bool "Load new peripheral configuration before jumping to the application"
