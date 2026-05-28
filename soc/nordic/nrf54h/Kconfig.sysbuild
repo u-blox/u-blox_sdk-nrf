@@ -6,6 +6,9 @@
 if SOC_SERIES_NRF54H
 
 config MCUBOOT_DIRECT_XIP_GENERATE_VARIANT
+	# ubx patch start: declare type, NCSDK-37325 (drop when fixed upstream)
+	bool
+	# ubx patch end
 	default n
 
 endif # SOC_SERIES_NRF54H

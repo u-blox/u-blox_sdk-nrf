@@ -60,13 +60,8 @@ config MCUBOOT_NRF_CLEANUP_PERIPHERAL
 	depends on SOC_FAMILY_NORDIC_NRF
 	default y
 
-if IRONSIDE_SE_CALL
-
-choice IRONSIDE_SE_CALL_DRIVER
-	default IRONSIDE_SE_CALL_MINIMAL
-endchoice
-
-endif
+# ubx patch start: drop IRONSIDE_SE_CALL_DRIVER choice, members undefined in v3.3.0, unused on nRF54L
+# ubx patch end
 
 config NCS_MCUBOOT_LOAD_PERIPHCONF
 	bool "Load new peripheral configuration before jumping to the application"
