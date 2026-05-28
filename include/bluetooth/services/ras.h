@@ -260,6 +260,14 @@ int bt_ras_rrsp_alloc(struct bt_conn *conn);
  */
 void bt_ras_rrsp_free(struct bt_conn *conn);
 
+/* ubx patch start: manual RRSP GATT (un)register, gated by BT_RAS_RRSP_MANUAL_SERVICE_REGISTER */
+/** @brief Register the RRSP GATT service. @return 0, -EALREADY, or negative errno. */
+int bt_ras_rrsp_service_register(void);
+
+/** @brief Unregister the RRSP GATT service. @return 0, -EALREADY, or negative errno. */
+int bt_ras_rrsp_service_unregister(void);
+/* ubx patch end */
+
 /** @brief Register ranging data buffer callbacks.
  *
  *  Register callbacks to monitor ranging data buffer state.
