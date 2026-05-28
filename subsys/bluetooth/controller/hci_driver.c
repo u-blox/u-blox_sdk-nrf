@@ -38,6 +38,14 @@
 #include "zephyr/logging/log.h"
 LOG_MODULE_REGISTER(bt_sdc_hci_driver);
 
+/* ubx patch start: weak hook for runtime CS antenna count (override to read from NVM) */
+#if defined(CONFIG_BT_CTLR_SDC_CS_COUNT)
+__weak uint8_t sdc_cs_num_antennas_get(void)
+{
+	return CONFIG_BT_CTLR_SDC_CS_NUM_ANTENNAS;
+}
+#endif
+/* ubx patch end */
 
 #if defined(CONFIG_BT_BUF_EVT_DISCARDABLE_COUNT)
 #define HCI_RX_BUF_SIZE MAX(BT_BUF_RX_SIZE, \
@@ -1236,17 +1244,8 @@ static int configure_memory_usage(void)
 	}
 #endif
 
-#if defined(CONFIG_BT_CTLR_SDC_CS_COUNT)
-	cfg.cs_cfg.max_antenna_paths_supported = CONFIG_BT_CTLR_SDC_CS_MAX_ANTENNA_PATHS;
-	cfg.cs_cfg.num_antennas_supported = CONFIG_BT_CTLR_SDC_CS_NUM_ANTENNAS;
-
-	required_memory = sdc_cfg_set(SDC_DEFAULT_RESOURCE_CFG_TAG,
-									SDC_CFG_TYPE_CS_CFG,
-									&cfg);
-	if (required_memory < 0) {
-		return required_memory;
-	}
-#endif
+	/* ubx patch start: CS_CFG moved to hci_driver_open(), runs after NVM settings load */
+	/* ubx patch end */
 
 #if defined(CONFIG_BT_CTLR_SDC_EXTENDED_FEAT_MAX_REMOTE_PAGE)
 	cfg.extended_feature_page_count = CONFIG_BT_CTLR_SDC_EXTENDED_FEAT_MAX_REMOTE_PAGE;
@@ -1321,6 +1320,32 @@ static int hci_driver_open(const struct device *dev, bt_hci_recv_t recv_func)
 		return -ENOTSUP;
 	}
 #endif
+
+	/* ubx patch start: deferred CS antenna config, runs after NVM settings load */
+#if defined(CONFIG_BT_CTLR_SDC_CS_COUNT)
+	{
+		sdc_cfg_t cfg;
+
+		cfg.cs_cfg.max_antenna_paths_supported =
+			CONFIG_BT_CTLR_SDC_CS_MAX_ANTENNA_PATHS;
+		cfg.cs_cfg.num_antennas_supported = sdc_cs_num_antennas_get();
+
+		int32_t required_memory =
+			sdc_cfg_set(SDC_DEFAULT_RESOURCE_CFG_TAG,
+				    SDC_CFG_TYPE_CS_CFG, &cfg);
+		if (required_memory < 0) {
+			MULTITHREADING_LOCK_RELEASE();
+			return required_memory;
+		}
+		if (required_memory > sizeof(sdc_mempool)) {
+			LOG_ERR("CS cfg: memory too low: %zu < %d",
+				sizeof(sdc_mempool), required_memory);
+			MULTITHREADING_LOCK_RELEASE();
+			return -ENOMEM;
+		}
+	}
+#endif
+	/* ubx patch end */
 
 	err = sdc_enable(hci_driver_receive_process, sdc_mempool);
 	if (err) {

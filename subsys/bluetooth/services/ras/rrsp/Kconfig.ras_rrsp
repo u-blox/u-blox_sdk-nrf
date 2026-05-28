@@ -15,6 +15,15 @@ config BT_RAS_RRSP_AUTO_ALLOC_INSTANCE
 	help
 	  Automatically allocate RRSP instances to new connections.
 
+# ubx patch start: opt-in manual RRSP GATT service registration
+config BT_RAS_RRSP_MANUAL_SERVICE_REGISTER
+	bool "Defer RRSP GATT service registration to the application"
+	default n
+	help
+	  When enabled, the application must call bt_ras_rrsp_service_register() /
+	  bt_ras_rrsp_service_unregister() instead of registering at SYS_INIT.
+# ubx patch end
+
 config BT_RAS_RRSP_MAX_ACTIVE_CONN
 	int "Number of simultaneously supported RRSP instances"
 	default BT_MAX_CONN

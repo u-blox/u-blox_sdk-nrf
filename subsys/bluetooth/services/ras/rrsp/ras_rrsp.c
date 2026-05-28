@@ -7,10 +7,12 @@
 #include <zephyr/bluetooth/conn.h>
 #include <zephyr/bluetooth/uuid.h>
 #include <zephyr/bluetooth/gatt.h>
+#include <zephyr/init.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/__assert.h>
 #include <zephyr/net_buf.h>
 #include <bluetooth/services/ras.h>
+#include <errno.h>
 
 #include "../ras_internal.h"
 
@@ -29,6 +31,7 @@ static struct bt_ras_rrsp {
 	struct k_work send_data_work;
 	struct k_work rascp_work;
 	struct k_work status_work;
+	struct k_work cleanup_work; /* ubx patch: off-sysworkq disconnect cleanup */
 	struct k_timer rascp_timeout;
 
 	struct bt_gatt_indicate_params ranging_data_ind_params;
@@ -50,12 +53,14 @@ static struct bt_ras_rrsp {
 } rrsp_pool[CONFIG_BT_RAS_RRSP_MAX_ACTIVE_CONN];
 
 static struct k_work_q rrsp_wq;
+static bool rrsp_service_registered; /* ubx patch: manual service-register state */
 
 static uint32_t ras_optional_features = RAS_FEAT_REALTIME_RD;
 
 static void send_data_work_handler(struct k_work *work);
 static void rascp_work_handler(struct k_work *work);
 static void status_work_handler(struct k_work *work);
+static void cleanup_work_handler(struct k_work *work); /* ubx patch */
 static void rascp_timeout_handler(struct k_timer *timer);
 
 static int ranging_data_notify_or_indicate(struct bt_conn *conn, struct net_buf_simple *buf);
@@ -82,6 +87,19 @@ static struct bt_ras_rrsp *rrsp_find(struct bt_conn *conn)
 
 	return NULL;
 }
+
+/* ubx patch start: connection-state helper for notify guard */
+static bool rrsp_conn_is_connected(const struct bt_conn *conn)
+{
+	struct bt_conn_info info;
+
+	if (bt_conn_get_info(conn, &info) != 0) {
+		return false;
+	}
+
+	return info.state == BT_CONN_STATE_CONNECTED;
+}
+/* ubx patch end */
 
 int bt_ras_rrsp_alloc(struct bt_conn *conn)
 {
@@ -110,6 +128,7 @@ int bt_ras_rrsp_alloc(struct bt_conn *conn)
 	k_work_init(&rrsp->send_data_work, send_data_work_handler);
 	k_work_init(&rrsp->rascp_work, rascp_work_handler);
 	k_work_init(&rrsp->status_work, status_work_handler);
+	k_work_init(&rrsp->cleanup_work, cleanup_work_handler); /* ubx patch */
 	k_timer_init(&rrsp->rascp_timeout, rascp_timeout_handler, NULL);
 
 	return 0;
@@ -127,10 +146,11 @@ void bt_ras_rrsp_free(struct bt_conn *conn)
 		(void)k_work_cancel(&rrsp->status_work);
 		k_timer_stop(&rrsp->rascp_timeout);
 
-		k_work_queue_drain(&rrsp_wq, false);
-
-		bt_conn_unref(rrsp->conn);
-		rrsp->conn = NULL;
+		/* ubx patch start: defer cleanup to rrsp_wq instead of k_work_queue_drain
+		 * on sysworkq, which deadlocks against an in-flight notify on the
+		 * connection being torn down. */
+		k_work_submit_to_queue(&rrsp_wq, &rrsp->cleanup_work);
+		/* ubx patch end */
 	}
 }
 
@@ -207,39 +227,60 @@ static void rd_overwritten_ccc_cfg_changed(struct bt_gatt_attr const *attr, uint
 	LOG_DBG("Ranging Data Overwritten CCCD changed: %u", value);
 }
 
-BT_GATT_SERVICE_DEFINE(
-	rrsp_svc, BT_GATT_PRIMARY_SERVICE(BT_UUID_RANGING_SERVICE),
-	/* RAS Features */
-	BT_GATT_CHARACTERISTIC(BT_UUID_RAS_FEATURES, BT_GATT_CHRC_READ, BT_GATT_PERM_READ_ENCRYPT,
-			       ras_features_read, NULL, NULL),
-	/* On-demand Ranging Data */
-	BT_GATT_CHARACTERISTIC(BT_UUID_RAS_ONDEMAND_RD, BT_GATT_CHRC_INDICATE | BT_GATT_CHRC_NOTIFY,
-			       BT_GATT_PERM_NONE, NULL, NULL, NULL),
-	BT_GATT_CCC_WITH_WRITE_CB(NULL, ondemand_rd_ccc_cfg_write_cb,
-				  BT_GATT_PERM_READ_ENCRYPT | BT_GATT_PERM_WRITE_ENCRYPT),
-	/* Real-time Ranging Data */
-	BT_GATT_CHARACTERISTIC(BT_UUID_RAS_REALTIME_RD, BT_GATT_CHRC_INDICATE | BT_GATT_CHRC_NOTIFY,
-			       BT_GATT_PERM_NONE, NULL, NULL, NULL),
-	BT_GATT_CCC_WITH_WRITE_CB(NULL, realtime_rd_ccc_cfg_write_cb,
-				  BT_GATT_PERM_READ_ENCRYPT | BT_GATT_PERM_WRITE_ENCRYPT),
-	/* RAS-CP */
-	BT_GATT_CHARACTERISTIC(BT_UUID_RAS_CP,
-			       BT_GATT_CHRC_WRITE_WITHOUT_RESP | BT_GATT_CHRC_INDICATE,
-			       BT_GATT_PERM_WRITE_ENCRYPT, NULL, ras_cp_write, NULL),
-	BT_GATT_CCC(ras_cp_ccc_cfg_changed, BT_GATT_PERM_READ_ENCRYPT | BT_GATT_PERM_WRITE_ENCRYPT),
-	/* Ranging Data Ready */
-	BT_GATT_CHARACTERISTIC(BT_UUID_RAS_RD_READY,
-			       BT_GATT_CHRC_READ | BT_GATT_CHRC_INDICATE | BT_GATT_CHRC_NOTIFY,
-			       BT_GATT_PERM_READ_ENCRYPT, rd_ready_read, NULL, NULL),
-	BT_GATT_CCC(rd_ready_ccc_cfg_changed,
-		    BT_GATT_PERM_READ_ENCRYPT | BT_GATT_PERM_WRITE_ENCRYPT),
-	/* Ranging Data Overwritten */
-	BT_GATT_CHARACTERISTIC(BT_UUID_RAS_RD_OVERWRITTEN,
-			       BT_GATT_CHRC_READ | BT_GATT_CHRC_INDICATE | BT_GATT_CHRC_NOTIFY,
-			       BT_GATT_PERM_READ_ENCRYPT, rd_overwritten_read, NULL, NULL),
-	BT_GATT_CCC(rd_overwritten_ccc_cfg_changed,
-		    BT_GATT_PERM_READ_ENCRYPT | BT_GATT_PERM_WRITE_ENCRYPT),
-);
+/* ubx patch start: attrs in a macro so the service can be registered either
+ * statically (default) or manually via bt_ras_rrsp_service_register(). */
+#define RRSP_GATT_ATTRS                                                              \
+	BT_GATT_PRIMARY_SERVICE(BT_UUID_RANGING_SERVICE),                            \
+	/* RAS Features */                                                           \
+	BT_GATT_CHARACTERISTIC(BT_UUID_RAS_FEATURES, BT_GATT_CHRC_READ,              \
+			       BT_GATT_PERM_READ_ENCRYPT, ras_features_read, NULL, \
+			       NULL),                                              \
+	/* On-demand Ranging Data */                                                 \
+	BT_GATT_CHARACTERISTIC(BT_UUID_RAS_ONDEMAND_RD,                              \
+			       BT_GATT_CHRC_INDICATE | BT_GATT_CHRC_NOTIFY,        \
+			       BT_GATT_PERM_NONE, NULL, NULL, NULL),               \
+	BT_GATT_CCC_WITH_WRITE_CB(NULL, ondemand_rd_ccc_cfg_write_cb,                \
+				  BT_GATT_PERM_READ_ENCRYPT |                     \
+					  BT_GATT_PERM_WRITE_ENCRYPT),           \
+	/* Real-time Ranging Data */                                                 \
+	BT_GATT_CHARACTERISTIC(BT_UUID_RAS_REALTIME_RD,                              \
+			       BT_GATT_CHRC_INDICATE | BT_GATT_CHRC_NOTIFY,        \
+			       BT_GATT_PERM_NONE, NULL, NULL, NULL),               \
+	BT_GATT_CCC_WITH_WRITE_CB(NULL, realtime_rd_ccc_cfg_write_cb,                \
+				  BT_GATT_PERM_READ_ENCRYPT |                     \
+					  BT_GATT_PERM_WRITE_ENCRYPT),           \
+	/* RAS-CP */                                                                 \
+	BT_GATT_CHARACTERISTIC(BT_UUID_RAS_CP,                                       \
+			       BT_GATT_CHRC_WRITE_WITHOUT_RESP |                 \
+				       BT_GATT_CHRC_INDICATE,                   \
+			       BT_GATT_PERM_WRITE_ENCRYPT, NULL, ras_cp_write,   \
+			       NULL),                                             \
+	BT_GATT_CCC(ras_cp_ccc_cfg_changed,                                          \
+		    BT_GATT_PERM_READ_ENCRYPT | BT_GATT_PERM_WRITE_ENCRYPT),       \
+	/* Ranging Data Ready */                                                     \
+	BT_GATT_CHARACTERISTIC(BT_UUID_RAS_RD_READY,                                 \
+			       BT_GATT_CHRC_READ | BT_GATT_CHRC_INDICATE |        \
+				       BT_GATT_CHRC_NOTIFY,                      \
+			       BT_GATT_PERM_READ_ENCRYPT, rd_ready_read, NULL,    \
+			       NULL),                                             \
+	BT_GATT_CCC(rd_ready_ccc_cfg_changed,                                        \
+		    BT_GATT_PERM_READ_ENCRYPT | BT_GATT_PERM_WRITE_ENCRYPT),       \
+	/* Ranging Data Overwritten */                                               \
+	BT_GATT_CHARACTERISTIC(BT_UUID_RAS_RD_OVERWRITTEN,                           \
+			       BT_GATT_CHRC_READ | BT_GATT_CHRC_INDICATE |        \
+				       BT_GATT_CHRC_NOTIFY,                      \
+			       BT_GATT_PERM_READ_ENCRYPT, rd_overwritten_read,    \
+			       NULL, NULL),                                       \
+	BT_GATT_CCC(rd_overwritten_ccc_cfg_changed,                                  \
+		    BT_GATT_PERM_READ_ENCRYPT | BT_GATT_PERM_WRITE_ENCRYPT)
+
+#if defined(CONFIG_BT_RAS_RRSP_MANUAL_SERVICE_REGISTER)
+static struct bt_gatt_attr rrsp_attrs[] = { RRSP_GATT_ATTRS };
+struct bt_gatt_service rrsp_svc = BT_GATT_SERVICE(rrsp_attrs);
+#else
+BT_GATT_SERVICE_DEFINE(rrsp_svc, RRSP_GATT_ATTRS);
+#endif
+/* ubx patch end */
 
 static ssize_t ondemand_rd_ccc_cfg_write_cb(struct bt_conn *conn, const struct bt_gatt_attr *attr,
 					    uint16_t value)
@@ -384,15 +425,13 @@ static int rd_segment_send(struct bt_ras_rrsp *rrsp)
 			rascp_send_complete_rd_rsp(rrsp->conn, rrsp->active_buf->ranging_counter);
 			k_timer_start(&rrsp->rascp_timeout, RASCP_ACK_DATA_TIMEOUT, K_NO_WAIT);
 		} else {
-			struct bt_gatt_attr *realtime_rd_attr =
-				bt_gatt_find_by_uuid(rrsp_svc.attrs, 0, BT_UUID_RAS_REALTIME_RD);
-
-			if (bt_gatt_is_subscribed(rrsp->conn, realtime_rd_attr,
-						  BT_GATT_CCC_NOTIFY | BT_GATT_CCC_INDICATE)) {
-				bt_ras_rd_buffer_release(rrsp->active_buf);
-				rrsp->active_buf = NULL;
-				rrsp->active_buf_read_cursor = 0;
-			}
+			/* ubx patch start: release unconditionally. Gating on
+			 * bt_gatt_is_subscribed(realtime_rd) leaked a refcount on
+			 * transient false; pool exhaustion stalled the controller. */
+			bt_ras_rd_buffer_release(rrsp->active_buf);
+			rrsp->active_buf = NULL;
+			rrsp->active_buf_read_cursor = 0;
+			/* ubx patch end */
 		}
 	}
 
@@ -410,8 +449,18 @@ static void send_data_work_handler(struct k_work *work)
 	int err = rd_segment_send(rrsp);
 
 	if (err) {
-		/* Will keep retrying. */
 		LOG_WRN("Failed to send segment: %d", err);
+
+		/* ubx patch start: error path must re-submit (upstream returned
+		 * without re-queuing, leaving streaming=true forever) or, on a
+		 * dead link, clear streaming so future procedures are not dropped. */
+		if (err == -ENOTCONN || err == -ECONNRESET || err == -ESHUTDOWN) {
+			rrsp->streaming = false;
+			return;
+		}
+
+		k_work_submit_to_queue(&rrsp_wq, &rrsp->send_data_work);
+		/* ubx patch end */
 	}
 }
 
@@ -461,6 +510,29 @@ static void status_work_handler(struct k_work *work)
 	}
 }
 
+/* ubx patch start: disconnect cleanup on rrsp_wq, serialised with worker items */
+static void cleanup_work_handler(struct k_work *work)
+{
+	struct bt_ras_rrsp *rrsp = CONTAINER_OF(work, struct bt_ras_rrsp, cleanup_work);
+
+	rrsp->streaming = false;
+	rrsp->notify_ready = false;
+	rrsp->notify_overwritten = false;
+	rrsp->handle_rascp_timeout = false;
+
+	if (rrsp->active_buf) {
+		(void)bt_ras_rd_buffer_release(rrsp->active_buf);
+		rrsp->active_buf = NULL;
+		rrsp->active_buf_read_cursor = 0;
+	}
+
+	if (rrsp->conn) {
+		bt_conn_unref(rrsp->conn);
+		rrsp->conn = NULL;
+	}
+}
+/* ubx patch end */
+
 static void rascp_timeout_handler(struct k_timer *timer)
 {
 	struct bt_ras_rrsp *rrsp = CONTAINER_OF(timer, struct bt_ras_rrsp, rascp_timeout);
@@ -495,6 +567,14 @@ static void new_rd_handle(struct bt_conn *conn, uint16_t ranging_counter)
 				if (!rrsp->streaming) {
 					rrsp->active_buf =
 						bt_ras_rd_buffer_claim(conn, ranging_counter);
+					/* ubx patch start: bail on claim failure, else streaming
+					 * stays true with NULL buf and drops all later data. */
+					if (!rrsp->active_buf) {
+						LOG_WRN("Realtime RD buffer claim failed for "
+							"ranging_counter=%u", ranging_counter);
+						return;
+					}
+					/* ubx patch end */
 					rrsp->active_buf_read_cursor = 0;
 					rrsp->segment_counter = 0;
 					rrsp->streaming = true;
@@ -527,6 +607,56 @@ static struct bt_ras_rd_buffer_cb rd_buffer_callbacks = {
 	.ranging_data_overwritten = rd_overwritten_handle,
 };
 
+/* ubx patch start: manual RRSP service (un)register, owns the RD buffer pool */
+int bt_ras_rrsp_service_register(void)
+{
+#if defined(CONFIG_BT_RAS_RRSP_MANUAL_SERVICE_REGISTER)
+	if (rrsp_service_registered) {
+		return -EALREADY;
+	}
+
+	int err = ras_rd_buffer_pool_init();
+	if (err) {
+		LOG_ERR("Failed to initialize RD buffer pool: %d", err);
+		return err;
+	}
+
+	err = bt_gatt_service_register(&rrsp_svc);
+
+	if (!err) {
+		rrsp_service_registered = true;
+	} else {
+		ras_rd_buffer_pool_cleanup();
+	}
+
+	return err;
+#else
+	ARG_UNUSED(rrsp_service_registered);
+	return -ENOTSUP;
+#endif
+}
+
+int bt_ras_rrsp_service_unregister(void)
+{
+#if defined(CONFIG_BT_RAS_RRSP_MANUAL_SERVICE_REGISTER)
+	if (!rrsp_service_registered) {
+		return -EALREADY;
+	}
+
+	int err = bt_gatt_service_unregister(&rrsp_svc);
+
+	if (!err) {
+		rrsp_service_registered = false;
+		ras_rd_buffer_pool_cleanup();
+	}
+
+	return err;
+#else
+	return -ENOTSUP;
+#endif
+}
+/* ubx patch end */
+
 static int ras_rrsp_init(void)
 {
 	const struct k_work_queue_config cfg = {.name = "BT RAS RRSP WQ"};
@@ -536,6 +666,17 @@ static int ras_rrsp_init(void)
 			   RRSP_WQ_PRIORITY, &cfg);
 
 	bt_ras_rd_buffer_cb_register(&rd_buffer_callbacks);
+
+	/* ubx patch start: auto-register path must also init the RD buffer pool */
+#if !defined(CONFIG_BT_RAS_RRSP_MANUAL_SERVICE_REGISTER)
+	int err = ras_rd_buffer_pool_init();
+
+	if (err) {
+		LOG_ERR("Failed to initialize RD buffer pool: %d", err);
+		return err;
+	}
+#endif
+	/* ubx patch end */
 
 	return 0;
 }
@@ -570,6 +711,14 @@ static int ranging_data_notify_or_indicate(struct bt_conn *conn, struct net_buf_
 	struct bt_ras_rrsp *rrsp = rrsp_find(conn);
 
 	__ASSERT_NO_MSG(rrsp);
+
+	/* ubx patch start: don't notify on a connection that is going away */
+	if (!rrsp_conn_is_connected(conn)) {
+		rrsp->streaming = false;
+		return -ENOTCONN;
+	}
+	/* ubx patch end */
+
 	ARG_UNUSED(rrsp);
 
 	attr = bt_gatt_find_by_uuid(rrsp_svc.attrs, 0, BT_UUID_RAS_REALTIME_RD);
