@@ -128,6 +128,9 @@ config NRF_SECURITY_ENABLER
 # Apply SoC-specific defaults here to avoid touching upstream Zephyr files.
 # Applications can still override via prj.conf.
 configdefault BT_TX_PROCESSOR_STACK_SIZE
+	# ubx patch start: declare type, sysbuild strict parse rejects typeless symbol
+	int
+	# ubx patch end
 	# nRF52 variants
 	default 768 if SOC_NRF52840
 	default 696 if SOC_NRF52832

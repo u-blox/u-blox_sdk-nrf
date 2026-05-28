@@ -83,6 +83,9 @@ endchoice
 # Internal bignum WPA3 is incompatible with the PSA alt backend; defaults use
 # EXT when HOSTAP_CRYPTO_WPA3_PSA is enabled (see Kconfig.defconfig).
 config WIFI_NM_WPA_SUPPLICANT_WPA3_IMPLEMENTATION_INT
+	# ubx patch start: declare type, sysbuild strict parse rejects typeless symbol
+	bool
+	# ubx patch end
 	depends on !HOSTAP_CRYPTO_ALT_PSA
 
 if WIFI_NM_WPA_SUPPLICANT_CRYPTO_ENTERPRISE
