@@ -77,6 +77,11 @@ struct ras_segment {
 	uint8_t               data[];
 } __packed;
 
+/* ubx patch start: dynamic RD buffer pool alloc/cleanup */
+int ras_rd_buffer_pool_init(void);
+void ras_rd_buffer_pool_cleanup(void);
+/* ubx patch end */
+
 #ifdef __cplusplus
 }
 #endif
